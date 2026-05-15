@@ -63,8 +63,13 @@ for i in $(seq 1 30); do
 done
 
 # --- Register as Connector (idempotent + retries) ---
-# warp-cli registration show в этой версии может не быть; пробуем connector new сразу.
-# Если уже зарегистрирован — связь установится через warp-cli connect.
+# При перезапуске контейнера warp-svc может видеть старую registration,
+# и connector new падает с "Old registration is still around. Try running warp-cli registration delete".
+# Делаем delete сначала (молча, ошибки игнорим), потом connector new.
+
+log "Cleaning old registration (if any)..."
+warp-cli --accept-tos registration delete 2>&1 | sed 's/^/  /' || true
+sleep 2
 
 REGISTERED=0
 for attempt in 1 2 3 4 5; do
@@ -82,6 +87,12 @@ for attempt in 1 2 3 4 5; do
         log "Already registered (idempotent)"
         REGISTERED=1
         break
+    fi
+    # Если "old registration still around" — повторим delete и попробуем снова
+    if echo "$OUTPUT" | grep -qi "old registration"; then
+        log "Old registration detected, forcing delete..."
+        warp-cli --accept-tos registration delete 2>&1 | sed 's/^/  /' || true
+        sleep 3
     fi
     log "Attempt failed, sleep 10s..."
     sleep 10
@@ -108,6 +119,32 @@ sleep 5
 log "Final status:"
 warp-cli --accept-tos status 2>&1 || true
 
+# --- NAT MASQUERADE on WARP interface (so traffic from LAN→container→WARP gets back) ---
+# Wait for CloudflareWARP interface to exist, then add MASQUERADE if not already present.
+for i in $(seq 1 30); do
+    if ip link show CloudflareWARP >/dev/null 2>&1; then
+        log "CloudflareWARP iface present after ${i}s"
+        break
+    fi
+    sleep 1
+done
+
+if ip link show CloudflareWARP >/dev/null 2>&1; then
+    # Outbound: LAN → Internet через WARP (selective voip routing)
+    # MikroTik MANGLE-маркирует voip-трафик и маршрутизирует на этот контейнер;
+    # MASQUERADE на CloudflareWARP перепишет источник на 100.96.0.18 для возврата ответов.
+    # Для INBOUND mesh-доступа (WARP-Client → LAN) используется cloudflared tunnel
+    # с привязанным CIDR route — этот контейнер inbound не обслуживает.
+    if ! iptables -t nat -C POSTROUTING -o CloudflareWARP -j MASQUERADE 2>/dev/null; then
+        log "Adding MASQUERADE on CloudflareWARP (outbound voip)..."
+        iptables -t nat -A POSTROUTING -o CloudflareWARP -j MASQUERADE && log "Outbound MASQUERADE OK" || log "Outbound MASQUERADE FAILED"
+    else
+        log "Outbound MASQUERADE already present"
+    fi
+else
+    log "WARN: CloudflareWARP iface never appeared, skipping MASQUERADE"
+fi
+
 # --- Watchdog loop: keep container alive, reconnect if disconnected ---
 log "Entering watchdog loop (60s interval)..."
 while true; do
@@ -121,7 +158,12 @@ while true; do
 
     STATUS=$(warp-cli --accept-tos status 2>&1 || true)
     if echo "$STATUS" | grep -qi "Connected"; then
-        :  # healthy, silent
+        # Healthy. Re-add MASQUERADE if missing (after reconnect interface may reset).
+        if ip link show CloudflareWARP >/dev/null 2>&1 \
+           && ! iptables -t nat -C POSTROUTING -o CloudflareWARP -j MASQUERADE 2>/dev/null; then
+            log "MASQUERADE missing after reconnect, re-adding..."
+            iptables -t nat -A POSTROUTING -o CloudflareWARP -j MASQUERADE 2>&1 || true
+        fi
     else
         log "Not connected. Status: $STATUS — reconnecting..."
         warp-cli --accept-tos connect 2>&1 || true
