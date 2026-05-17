@@ -1,12 +1,12 @@
-# WARP Connector в контейнере для MikroTik
-# Базируется на Debian Bookworm, ставит официальный cloudflare-warp package.
-# Запускает warp-svc без systemd, активирует Connector mode по токену из env.
+# WARP Connector in a container for MikroTik
+# Based on Debian Bookworm, installs the official cloudflare-warp package.
+# Runs warp-svc without systemd, activates Connector mode using the token from env.
 
 FROM debian:bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Зависимости + ключи Cloudflare + warp пакет
+# Dependencies + Cloudflare keys + warp package
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         curl ca-certificates gnupg lsb-release dbus iproute2 iptables && \
@@ -19,10 +19,10 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Состояние WARP (registrations, конфиг)
+# WARP state (registrations, config)
 VOLUME ["/var/lib/cloudflare-warp"]
 
-# Токен подключения. Передаётся при `docker run -e CONNECTOR_TOKEN=...` или через MikroTik envlist
+# Connection token. Passed via `docker run -e CONNECTOR_TOKEN=...` or through MikroTik envlist
 ENV CONNECTOR_TOKEN=""
 
 COPY entrypoint.sh /entrypoint.sh

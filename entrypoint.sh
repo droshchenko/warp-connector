@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # WARP Connector entrypoint for MikroTik containers
-# - НЕ exit при первой ошибке (warp-svc прогревается ~5-10s)
-# - retry на connector new и connect
-# - watchdog: при разрыве переподключается
+# - Do NOT exit on first error (warp-svc needs ~5-10s to warm up)
+# - retry on connector new and connect
+# - watchdog: reconnects on disconnect
 
 log() {
     echo "[warp-entrypoint $(date -u +%H:%M:%S)] $*"
@@ -26,7 +26,7 @@ if [ -z "${CONNECTOR_TOKEN}" ]; then
     exit 1
 fi
 
-# --- /dev/net/tun (на Debian не auto-провижится, делаем mknod; CAP_MKNOD есть в MikroTik containers) ---
+# --- /dev/net/tun (not auto-provisioned on Debian, using mknod; CAP_MKNOD is present in MikroTik containers) ---
 if [ ! -c /dev/net/tun ]; then
     log "/dev/net/tun missing — creating via mknod c 10 200..."
     mkdir -p /dev/net
@@ -51,7 +51,7 @@ warp-svc > /tmp/warp-svc.log 2>&1 &
 WARP_PID=$!
 log "warp-svc PID=$WARP_PID"
 
-# Wait until daemon socket is reachable. warp-svc нужно ~5-10s чтобы быть полностью готовым.
+# Wait until daemon socket is reachable. warp-svc needs ~5-10s to be fully ready.
 log "Waiting for warp-svc to be ready..."
 sleep 10
 for i in $(seq 1 30); do
@@ -63,9 +63,9 @@ for i in $(seq 1 30); do
 done
 
 # --- Register as Connector (idempotent + retries) ---
-# При перезапуске контейнера warp-svc может видеть старую registration,
-# и connector new падает с "Old registration is still around. Try running warp-cli registration delete".
-# Делаем delete сначала (молча, ошибки игнорим), потом connector new.
+# On container restart, warp-svc might see an old registration,
+# and connector new fails with "Old registration is still around. Try running warp-cli registration delete".
+# We delete first (silently, ignoring errors), then call connector new.
 
 log "Cleaning old registration (if any)..."
 warp-cli --accept-tos registration delete 2>&1 | sed 's/^/  /' || true
@@ -82,13 +82,13 @@ for attempt in 1 2 3 4 5; do
         REGISTERED=1
         break
     fi
-    # Если "already registered" — тоже считаем успехом
+    # If "already registered" — consider it a success
     if echo "$OUTPUT" | grep -qiE "already|exists"; then
         log "Already registered (idempotent)"
         REGISTERED=1
         break
     fi
-    # Если "old registration still around" — повторим delete и попробуем снова
+    # If "old registration still around" — retry delete and try again
     if echo "$OUTPUT" | grep -qi "old registration"; then
         log "Old registration detected, forcing delete..."
         warp-cli --accept-tos registration delete 2>&1 | sed 's/^/  /' || true
@@ -130,11 +130,11 @@ for i in $(seq 1 30); do
 done
 
 if ip link show CloudflareWARP >/dev/null 2>&1; then
-    # Outbound: LAN → Internet через WARP (selective voip routing)
-    # MikroTik MANGLE-маркирует voip-трафик и маршрутизирует на этот контейнер;
-    # MASQUERADE на CloudflareWARP перепишет источник на 100.96.0.18 для возврата ответов.
-    # Для INBOUND mesh-доступа (WARP-Client → LAN) используется cloudflared tunnel
-    # с привязанным CIDR route — этот контейнер inbound не обслуживает.
+    # Outbound: LAN → Internet via WARP (selective voip routing)
+    # MikroTik MANGLE marks voip traffic and routes to this container;
+    # MASQUERADE on CloudflareWARP will rewrite source to 100.96.0.x to get replies back.
+    # For INBOUND mesh access (WARP-Client → LAN), a cloudflared tunnel is used
+    # with bound CIDR route — this container does not serve inbound traffic.
     if ! iptables -t nat -C POSTROUTING -o CloudflareWARP -j MASQUERADE 2>/dev/null; then
         log "Adding MASQUERADE on CloudflareWARP (outbound voip)..."
         iptables -t nat -A POSTROUTING -o CloudflareWARP -j MASQUERADE && log "Outbound MASQUERADE OK" || log "Outbound MASQUERADE FAILED"
