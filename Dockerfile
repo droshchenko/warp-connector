@@ -6,8 +6,13 @@ FROM debian:bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# Cache-buster: GitHub Actions passes run_id here so the apt layer is never
+# reused from the gha cache and every build installs the latest cloudflare-warp.
+ARG WARP_CACHEBUST=1
+
 # Dependencies + Cloudflare keys + warp package
-RUN apt-get update && \
+RUN echo "cachebust=${WARP_CACHEBUST}" && \
+    apt-get update && \
     apt-get install -y --no-install-recommends \
         curl ca-certificates gnupg lsb-release dbus iproute2 iptables && \
     curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg \
@@ -16,6 +21,7 @@ RUN apt-get update && \
         > /etc/apt/sources.list.d/cloudflare-client.list && \
     apt-get update && \
     apt-get install -y --no-install-recommends cloudflare-warp && \
+    (dpkg-query -W -f='${Version}' cloudflare-warp > /warp-version || true) && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 

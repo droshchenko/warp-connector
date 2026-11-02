@@ -19,6 +19,8 @@ cleanup() {
 }
 trap cleanup SIGTERM SIGINT
 
+log "cloudflare-warp version: $(cat /warp-version 2>/dev/null || warp-cli --version 2>/dev/null || echo unknown)"
+
 # --- Sanity ---
 if [ -z "${CONNECTOR_TOKEN}" ]; then
     log "ERROR: CONNECTOR_TOKEN env is empty. Set via envlist on MikroTik container."
@@ -148,7 +150,10 @@ fi
 # --- Watchdog loop: keep container alive, reconnect if disconnected ---
 log "Entering watchdog loop (60s interval)..."
 while true; do
-    sleep 60
+    # sleep in background + wait: bash runs the SIGTERM trap immediately instead of
+    # after `sleep 60` ends (MikroTik stop-time=10s used to SIGKILL the container).
+    sleep 60 &
+    wait $!
 
     # If warp-svc died — exit so MikroTik restarts container
     if ! kill -0 "$WARP_PID" 2>/dev/null; then
@@ -157,7 +162,8 @@ while true; do
     fi
 
     STATUS=$(warp-cli --accept-tos status 2>&1 || true)
-    if echo "$STATUS" | grep -qi "Connected"; then
+    # NB: plain grep "Connected" also matches "Disconnected" -> watchdog never reconnected.
+    if echo "$STATUS" | grep -qiE "Status update:[[:space:]]*Connected"; then
         # Healthy. Re-add MASQUERADE if missing (after reconnect interface may reset).
         if ip link show CloudflareWARP >/dev/null 2>&1 \
            && ! iptables -t nat -C POSTROUTING -o CloudflareWARP -j MASQUERADE 2>/dev/null; then
